@@ -22,9 +22,9 @@ def write_datafile(filename, tokens_np):
 # Main function to process input.txt
 def process_data():
     local_dir = "inputtxt_dataset"
-    shard_size = int(5e4)  # Set shard size to 100,000 tokens per shard
+    shard_size = int(5e4)  # Set shard size to 50,000 tokens per shard
     input_file = os.path.join(local_dir, "input.txt")  # Input file to process
-    DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
+    DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir+"/shards")
     os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
     # Load the content of the input.txt file
@@ -35,7 +35,9 @@ def process_data():
     docs = doc_text.split("\n\n")
 
     nprocs = max(1, os.cpu_count() // 2)
-    nprocs = 2
+    nprocs = 1
+
+    total_tokens_processed = 0  # To track the total number of tokens
 
     # Initialize multiprocessing pool
     with mp.Pool(nprocs) as pool:
@@ -46,6 +48,7 @@ def process_data():
 
         # Tokenize each document and write it into shards
         for tokens in pool.imap(tokenize, docs, chunksize=16):
+            total_tokens_processed += len(tokens)  # Accumulate total tokens
             if token_count + len(tokens) < shard_size:
                 all_tokens_np[token_count:token_count + len(tokens)] = tokens
                 token_count += len(tokens)
@@ -71,7 +74,9 @@ def process_data():
             filename = os.path.join(DATA_CACHE_DIR, f"{split}_shard_{shard_index:06d}.npy")
             write_datafile(filename, all_tokens_np[:token_count])
 
+    # Print total number of tokens processed
     print(f"Sharding complete. {shard_index + 1} shards created.")
+    print(f"Total number of tokens processed: {total_tokens_processed}")
 
 # Use the if __name__ == '__main__': guard
 if __name__ == '__main__':

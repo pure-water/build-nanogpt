@@ -9,6 +9,10 @@ from torch.nn import functional as F
 from hellaswag import render_example, iterate_examples
 # -----------------------------------------------------------------------------
 
+USE_INPUTTXT = True  # Set to True to use the shard-based dataset, False for the original dataset
+
+
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -220,8 +224,13 @@ class DataLoaderLite:
         assert split in {'train', 'val'}
 
         # get the shard filenames
-        data_root = "edu_fineweb10B"
+        data_root = "inputtxt_dataset\shards" if USE_INPUTTXT else "edu_fineweb10B"
+
         shards = os.listdir(data_root)
+        print(f"Shard files found: {shards}")  # Debug print
+
+        print("data_root:",data_root)
+
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
         shards = [os.path.join(data_root, s) for s in shards]
@@ -288,6 +297,7 @@ import torch.distributed as dist
 # set up DDP (distributed data parallel).
 # torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+print("DDP",ddp)
 if ddp:
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
     assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
@@ -300,6 +310,7 @@ if ddp:
     master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 else:
     # vanilla, non-DDP run
+    print("--Non DDP run")
     ddp_rank = 0
     ddp_local_rank = 0
     ddp_world_size = 1
@@ -321,8 +332,10 @@ if torch.cuda.is_available():
 
 enc = tiktoken.get_encoding("gpt2")
 
-total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
-B = 64 # micro batch size
+total_batch_size = 65536 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
+#B = 64 # micro batch size
+#B = 16 # micro batch size
+B = 2 # micro batch size
 T = 1024 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -444,7 +457,7 @@ for step in range(max_steps):
                 f.write(f"{step} hella {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except step 0, which is noise)
-    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile):
+    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile) and (not USE_INPUTTXT):
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -479,6 +492,12 @@ for step in range(max_steps):
             decoded = enc.decode(tokens)
             print(f"rank {ddp_rank} sample {i}: {decoded}")
 
+   
+   
+   
+   
+   
+       
     # do one step of the optimization
     model.train()
     optimizer.zero_grad()
