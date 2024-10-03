@@ -11,7 +11,10 @@ def tokenize(doc_text):
     tokens = [eot]
     tokens.extend(enc.encode_ordinary(doc_text))
     tokens_np = np.array(tokens)
-    assert (0 <= tokens_np).all() and (tokens_np < 2**16).all(), "token dictionary too large for uint16"
+    
+    # Check if tokens are within valid range
+    assert (0 <= tokens_np).all() and (tokens_np < 2**16).all(), "Token dictionary too large for uint16"
+    
     tokens_np_uint16 = tokens_np.astype(np.uint16)
     return tokens_np_uint16
 
@@ -19,12 +22,27 @@ def tokenize(doc_text):
 def write_datafile(filename, tokens_np):
     np.save(filename, tokens_np)
 
+# Function to check token array for issues (NaN, Inf) and print token preview
+def inspect_tokens(tokens, shard_index):
+    print(f"\nInspecting tokens in shard {shard_index}...")
+    # Check for NaN and Inf
+    if np.isnan(tokens).any():
+        print("Warning: NaN detected in tokens!")
+    if np.isinf(tokens).any():
+        print("Warning: Inf detected in tokens!")
+    
+    # Print statistics
+    print(f"Token preview (first 10 tokens): {tokens[:10]}")
+    print(f"Token preview (last 10 tokens): {tokens[-10:]}")
+    print(f"Max token value: {tokens.max()}, Min token value: {tokens.min()}")
+    print(f"Total number of tokens in this shard: {len(tokens)}\n")
+
 # Main function to process input.txt
 def process_data():
     local_dir = "inputtxt_dataset"
-    shard_size = int(5e4)  # Set shard size to 50,000 tokens per shard
+    shard_size = int(1e5)  # Set shard size to 100,000 tokens per shard
     input_file = os.path.join(local_dir, "input.txt")  # Input file to process
-    DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir+"/shards")
+    DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir + "/shards")
     os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
     # Load the content of the input.txt file
@@ -44,7 +62,7 @@ def process_data():
         shard_index = 0
         all_tokens_np = np.empty((shard_size,), dtype=np.uint16)
         token_count = 0
-        progress_bar = None
+        progress_bar = tqdm(total=shard_size, unit="tokens", desc=f"Shard {shard_index}", position=0, leave=False)
 
         # Tokenize each document and write it into shards
         for tokens in pool.imap(tokenize, docs, chunksize=16):
@@ -52,8 +70,6 @@ def process_data():
             if token_count + len(tokens) < shard_size:
                 all_tokens_np[token_count:token_count + len(tokens)] = tokens
                 token_count += len(tokens)
-                if progress_bar is None:
-                    progress_bar = tqdm(total=shard_size, unit="tokens", desc=f"Shard {shard_index}")
                 progress_bar.update(len(tokens))
             else:
                 # Assign first shard to 'val', the rest to 'train'
@@ -62,11 +78,21 @@ def process_data():
                 remainder = shard_size - token_count
                 progress_bar.update(remainder)
                 all_tokens_np[token_count:token_count + remainder] = tokens[:remainder]
+
+                # Write the shard
                 write_datafile(filename, all_tokens_np)
+
+                # Inspect the shard for issues
+                inspect_tokens(all_tokens_np, shard_index)
+
+                # Move to the next shard
                 shard_index += 1
-                progress_bar = None
                 all_tokens_np[0:len(tokens) - remainder] = tokens[remainder:]
                 token_count = len(tokens) - remainder
+
+                # Reset progress bar for the next shard
+                progress_bar.close()
+                progress_bar = tqdm(total=shard_size, unit="tokens", desc=f"Shard {shard_index}", position=0, leave=False)
 
         # Write remaining tokens to the final shard
         if token_count != 0:
@@ -74,8 +100,14 @@ def process_data():
             filename = os.path.join(DATA_CACHE_DIR, f"{split}_shard_{shard_index:06d}.npy")
             write_datafile(filename, all_tokens_np[:token_count])
 
+            # Inspect the final shard for issues
+            inspect_tokens(all_tokens_np[:token_count], shard_index)
+
+        # Close the final progress bar
+        progress_bar.close()
+
     # Print total number of tokens processed
-    print(f"Sharding complete. {shard_index + 1} shards created.")
+    print(f"\nSharding complete. {shard_index + 1} shards created.")
     print(f"Total number of tokens processed: {total_tokens_processed}")
 
 # Use the if __name__ == '__main__': guard
