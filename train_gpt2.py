@@ -240,6 +240,9 @@ class DataLoaderLite:
         # get the shard filenames
         data_root = "inputtxt_dataset\shards" if USE_INPUTTXT else "edu_fineweb10B"
 
+        # Get the shard filenames
+        data_root = os.path.join("inputtxt_dataset", "shards") if USE_INPUTTXT else "edu_fineweb10B"
+
         shards = os.listdir(data_root)
         print(f"Shard files found: {shards}")  # Debug print
 
