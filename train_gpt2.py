@@ -1,3 +1,4 @@
+import sys
 import os
 import math
 import time
@@ -10,7 +11,7 @@ from hellaswag import render_example, iterate_examples
 # -----------------------------------------------------------------------------
 
 USE_INPUTTXT = True  # Set to True to use the shard-based dataset, False for the original dataset
-
+USE_FLASH    = False
 
 
 class CausalSelfAttention(nn.Module):
@@ -37,9 +38,19 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        #self attentoin
+        if (USE_FLASH):
+          y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
+          y = F.scaled_dot_product_attention(q, k, v, is_causal=False) # flash attention
+        else :
+          # Standard dot-product attention instead of flash attention
+          attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (C // self.n_head) ** 0.5  # Scaled dot-product
+          attn_scores = attn_scores.masked_fill(torch.tril(torch.ones(T, T)).bool().to(x.device) == 0, float('-inf'))  # Mask to ensure causality
+          attn_weights = F.softmax(attn_scores, dim=-1)
+          y = torch.matmul(attn_weights, v)
+
         # output projection
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         y = self.c_proj(y)
         return y
 
@@ -79,6 +90,9 @@ class GPTConfig:
     n_layer: int = 12 # number of layers
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
+    # n_layer: int = 1 # number of layers
+    # n_head: int = 1 # number of heads
+    # n_embd: int = 384 # embedding dimension
 
 class GPT(nn.Module):
 
@@ -102,14 +116,14 @@ class GPT(nn.Module):
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            std = 0.02
+            std = 0.01
             if hasattr(module, 'NANOGPT_SCALE_INIT'):
                 std *= (2 * self.config.n_layer) ** -0.5
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.01)
 
     def forward(self, idx, targets=None):
         # idx is of shape (B, T)
@@ -332,11 +346,12 @@ if torch.cuda.is_available():
 
 enc = tiktoken.get_encoding("gpt2")
 
-total_batch_size = 65536 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
 #B = 64 # micro batch size
 #B = 16 # micro batch size
-B = 2 # micro batch size
+B = 1 # micro batch size
 T = 1024 # sequence length
+# total_batch_size = 32768 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
+total_batch_size = B * T * 16 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
@@ -353,13 +368,14 @@ model = GPT(GPTConfig(vocab_size=50304))
 # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
 model.to(device)
 use_compile = False # torch.compile interferes with HellaSwag eval and Generation. TODO fix
+# use_compile = True # torch.compile interferes with HellaSwag eval and Generation. TODO fix
 if use_compile:
     model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 6e-4
+max_lr = 1e-5
 min_lr = max_lr * 0.1
 warmup_steps = 715
 max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
@@ -377,7 +393,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 # optimize!
-optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=3e-4, device_type=device_type)
 
 # create the log directory we will write checkpoints to and log to
 log_dir = "log"
@@ -385,6 +401,30 @@ os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
     pass
+
+# Add this function to check for NaN or Inf values
+def check_for_nan_or_inf(tensor, name=""):
+    if torch.isinf(tensor).any():
+        print(f"Warning: Found inf values in {name}")
+        sys.exit(1)
+    if torch.isnan(tensor).any():
+        print(f"Warning: Found nan values in {name}")
+        sys.exit(1)
+
+def check_gradients(model):
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            if torch.isinf(param.grad).any():
+                print(f"Error: Found inf gradients in {name}")
+                raise ValueError(f"Gradient explosion detected in {name} (inf). Stopping training.")
+                sys.exit(1)
+            if torch.isnan(param.grad).any():
+                print(f"Error: Found nan gradients in {name}")
+                raise ValueError(f"Gradient explosion detected in {name} (nan). Stopping training.")
+                sys.exit(1)
+
+
+
 
 for step in range(max_steps):
     t0 = time.time()
@@ -400,8 +440,10 @@ for step in range(max_steps):
             for _ in range(val_loss_steps):
                 x, y = val_loader.next_batch()
                 x, y = x.to(device), y.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
+                #3060 Ti
+                #with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                #with torch.autocast(device_type=device_type, dtype=torch.float16):
+                logits, loss = model(x, y)
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
         if ddp:
@@ -424,7 +466,7 @@ for step in range(max_steps):
                 torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if (step % 250 == 0 or last_step) and (not use_compile):
+    if (step % 250 == 0 or last_step) and (not use_compile) and (not USE_INPUTTXT):
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -437,7 +479,8 @@ for step in range(max_steps):
             mask = mask.to(device)
             # get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                #with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.float16):
                     logits, loss = model(tokens)
                 pred_norm = get_most_likely_row(tokens, mask, logits)
             num_total += 1
@@ -457,7 +500,7 @@ for step in range(max_steps):
                 f.write(f"{step} hella {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except step 0, which is noise)
-    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile) and (not USE_INPUTTXT):
+    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile) :
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -470,8 +513,9 @@ for step in range(max_steps):
         while xgen.size(1) < max_length:
             # forward the model to get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    logits, loss = model(xgen) # (B, T, vocab_size)
+                #with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                #with torch.autocast(device_type=device_type, dtype=torch.float16):
+                logits, loss = model(xgen) # (B, T, vocab_size)
                 # take the logits at the last position
                 logits = logits[:, -1, :] # (B, vocab_size)
                 # get the probabilities
@@ -504,12 +548,19 @@ for step in range(max_steps):
     loss_accum = 0.0
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
+
+        # Check for NaN or Inf in input data
+        check_for_nan_or_inf(x, "input x")
+        check_for_nan_or_inf(y, "target y")
+
         x, y = x.to(device), y.to(device)
         # added after video, this field is also used by the forward pass.
         if ddp:
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
+        #with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        #with torch.autocast(device_type=device_type, dtype=torch.float16):
+
+        logits, loss = model(x, y)
         # we have to scale the loss to account for gradient accumulation,
         # because the gradients just add on each successive backward().
         # addition of gradients corresponds to a SUM in the objective, but
@@ -517,9 +568,24 @@ for step in range(max_steps):
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
         loss.backward()
+
+        # Check gradients for NaN or Inf
+        # print("checking individual tensor gradient")
+        check_gradients(model)  # Add this line to stop if gradients explode
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    # norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    print("Traing step ",step,'accumulated steps', grad_accum_steps)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+
+    print("gradient normal check before clipping")
+    check_for_nan_or_inf(norm,"gradient normal")
+    print("gradient normal check after clipping")
+        # Log NaN/Inf values
+    for p in model.parameters():
+        if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
+            print(f"Gradients exploded in parameter: {p}")
+            exit()
     # determine and set the learning rate for this iteration
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
@@ -538,3 +604,4 @@ for step in range(max_steps):
 
 if ddp:
     destroy_process_group()
+
