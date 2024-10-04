@@ -315,6 +315,32 @@ import torch.distributed as dist
 # torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
 print("DDP",ddp)
+
+# Check if CUDA is available
+if torch.cuda.is_available():
+    # Get the device index (if you have multiple GPUs, adjust the index)
+    device_index = torch.cuda.current_device()
+    
+    # Query the compute capability of the current GPU
+    compute_capability = torch.cuda.get_device_capability(device_index)
+    
+    print(f"GPU Compute Capability: {compute_capability}")
+    
+    # Branch based on compute capability
+    if compute_capability >= (8, 0):  # For GPUs that support bfloat16 (Ampere and later)
+        print("Using bfloat16 precision.")
+        amp_precision = torch.bfloat16
+    elif compute_capability >= (7, 0):  # For GPUs like Turing (e.g., Tesla T4) that support float16
+        print("Using float16 precision.")
+        amp_precision = torch.float16
+    else:
+        print("Using float32 precision (default).")
+        amp_precision = torch.float32
+else:
+    print("CUDA is not available. Using CPU and float32 precision.")
+    amp_precision = torch.float32
+
+
 if ddp:
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
     assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
@@ -444,10 +470,9 @@ for step in range(max_steps):
                 x, y = val_loader.next_batch()
                 x, y = x.to(device), y.to(device)
                 #3060 Ti
-                #with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                #with torch.autocast(device_type=device_type, dtype=torch.float16):
-                logits, loss = model(x, y)
-                loss = loss / val_loss_steps
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                   logits, loss = model(x, y)
+                   loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
         if ddp:
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
