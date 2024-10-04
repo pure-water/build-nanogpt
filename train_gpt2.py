@@ -382,7 +382,8 @@ enc = tiktoken.get_encoding("gpt2")
 B = 8  # micro batch size
 T = 1024 # sequence length
 # total_batch_size = 32768 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
-total_batch_size = B * T * 32 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
+#total_batch_size = B * T * 32 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
+total_batch_size = B * T * 64 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
