@@ -13,6 +13,7 @@ from hellaswag import render_example, iterate_examples
 USE_INPUTTXT = True  # Set to True to use the shard-based dataset, False for the original dataset
 USE_FLASH    = True 
 
+print("USE_FLASH:",USE_FLASH)
 
 class CausalSelfAttention(nn.Module):
 
@@ -377,7 +378,7 @@ enc = tiktoken.get_encoding("gpt2")
 
 #B = 64 # micro batch size
 #B = 16 # micro batch size
-B = 4 # micro batch size
+B = 16  # micro batch size
 T = 1024 # sequence length
 # total_batch_size = 32768 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
 total_batch_size = B * T * 16 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
