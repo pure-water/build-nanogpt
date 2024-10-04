@@ -11,7 +11,7 @@ from hellaswag import render_example, iterate_examples
 # -----------------------------------------------------------------------------
 
 USE_INPUTTXT = True  # Set to True to use the shard-based dataset, False for the original dataset
-USE_FLASH    = False
+USE_FLASH    = True 
 
 
 class CausalSelfAttention(nn.Module):
