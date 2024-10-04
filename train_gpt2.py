@@ -601,7 +601,7 @@ for step in range(max_steps):
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     # norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    print("Traing step ",step,'accumulated steps', grad_accum_steps)
+    # print("Traing step ",step,'accumulated steps', grad_accum_steps)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
 
     # print("gradient normal check before clipping")
