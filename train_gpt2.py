@@ -470,7 +470,7 @@ for step in range(max_steps):
                 x, y = val_loader.next_batch()
                 x, y = x.to(device), y.to(device)
                 #3060 Ti
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=amp_precision):
                    logits, loss = model(x, y)
                    loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
@@ -578,17 +578,15 @@ for step in range(max_steps):
         x, y = train_loader.next_batch()
 
         # Check for NaN or Inf in input data
-        check_for_nan_or_inf(x, "input x")
-        check_for_nan_or_inf(y, "target y")
+        # check_for_nan_or_inf(x, "input x")
+        # check_for_nan_or_inf(y, "target y")
 
         x, y = x.to(device), y.to(device)
         # added after video, this field is also used by the forward pass.
         if ddp:
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-        #with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-        #with torch.autocast(device_type=device_type, dtype=torch.float16):
-
-        logits, loss = model(x, y)
+        with torch.autocast(device_type=device_type, dtype=amp_precision):
+            logits, loss = model(x, y)
         # we have to scale the loss to account for gradient accumulation,
         # because the gradients just add on each successive backward().
         # addition of gradients corresponds to a SUM in the objective, but
@@ -599,21 +597,21 @@ for step in range(max_steps):
 
         # Check gradients for NaN or Inf
         # print("checking individual tensor gradient")
-        check_gradients(model)  # Add this line to stop if gradients explode
+        # check_gradients(model)  # Add this line to stop if gradients explode
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     # norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     print("Traing step ",step,'accumulated steps', grad_accum_steps)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
 
-    print("gradient normal check before clipping")
-    check_for_nan_or_inf(norm,"gradient normal")
-    print("gradient normal check after clipping")
+    # print("gradient normal check before clipping")
+    # check_for_nan_or_inf(norm,"gradient normal")
+    # print("gradient normal check after clipping")
         # Log NaN/Inf values
-    for p in model.parameters():
-        if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
-            print(f"Gradients exploded in parameter: {p}")
-            exit()
+    # for p in model.parameters():
+    #     if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
+    #         print(f"Gradients exploded in parameter: {p}")
+    #         exit()
     # determine and set the learning rate for this iteration
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
