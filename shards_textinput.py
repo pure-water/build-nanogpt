@@ -3,8 +3,9 @@ import multiprocessing as mp
 import numpy as np
 from tqdm import tqdm
 import tiktoken
+import argparse
 
-# Tokenization function for input.txt
+# Tokenization function for text input
 def tokenize(doc_text):
     enc = tiktoken.get_encoding("gpt2")
     eot = enc._special_tokens['<|endoftext|>']
@@ -37,23 +38,22 @@ def inspect_tokens(tokens, shard_index):
     print(f"Max token value: {tokens.max()}, Min token value: {tokens.min()}")
     print(f"Total number of tokens in this shard: {len(tokens)}\n")
 
-# Main function to process input.txt
-def process_data():
-    local_dir = "inputtxt_dataset"
+# Main function to process any input file
+def process_data(input_file, dataset_name):
     shard_size = int(1e5)  # Set shard size to 100,000 tokens per shard
-    input_file = os.path.join(local_dir, "input.txt")  # Input file to process
+    local_dir = f"{dataset_name}_dataset"
     DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir + "/shards")
     os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
-    # Load the content of the input.txt file
+    # Load the content of the input file
     with open(input_file, 'r', encoding='utf-8') as f:
         doc_text = f.read()
 
-    # Split text into paragraphs or sentences to simulate multiple documents
+    # Split text into paragraphs or sections to simulate multiple documents
     docs = doc_text.split("\n\n")
 
-    nprocs = max(1, os.cpu_count() // 2)
-    nprocs = 1
+    nprocs = max(1, os.cpu_count() // 2)  # Adjust process count based on available CPU cores
+    nprocs = 1  # You can increase this for multiprocessing if needed
 
     total_tokens_processed = 0  # To track the total number of tokens
 
@@ -74,7 +74,7 @@ def process_data():
             else:
                 # Assign first shard to 'val', the rest to 'train'
                 split = "val" if shard_index == 0 else "train"
-                filename = os.path.join(DATA_CACHE_DIR, f"{split}_shard_{shard_index:06d}.npy")
+                filename = os.path.join(DATA_CACHE_DIR, f"{split}_shard_{dataset_name}_{shard_index:06d}.npy")
                 remainder = shard_size - token_count
                 progress_bar.update(remainder)
                 all_tokens_np[token_count:token_count + remainder] = tokens[:remainder]
@@ -97,7 +97,7 @@ def process_data():
         # Write remaining tokens to the final shard
         if token_count != 0:
             split = "val" if shard_index == 0 else "train"
-            filename = os.path.join(DATA_CACHE_DIR, f"{split}_shard_{shard_index:06d}.npy")
+            filename = os.path.join(DATA_CACHE_DIR, f"{split}_shard_{dataset_name}_{shard_index:06d}.npy")
             write_datafile(filename, all_tokens_np[:token_count])
 
             # Inspect the final shard for issues
@@ -113,4 +113,13 @@ def process_data():
 # Use the if __name__ == '__main__': guard
 if __name__ == '__main__':
     mp.freeze_support()  # Necessary on Windows when using multiprocessing
-    process_data()
+
+    # Argument parser to accept dynamic inputs
+    parser = argparse.ArgumentParser(description="Process different input datasets and tokenize them.")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name (e.g., inputtxt, fineweb, vulkan)")
+    parser.add_argument("--input_file", type=str, required=True, help="Path to the input file (e.g., vulkan_spec.txt)")
+
+    args = parser.parse_args()
+    
+    # Call process_data function with appropriate input file and dataset name
+    process_data(args.input_file, args.dataset)
