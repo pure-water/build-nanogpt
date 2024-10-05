@@ -15,6 +15,18 @@ USE_FLASH    = True
 
 print("USE_FLASH:",USE_FLASH)
 
+import argparse
+
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description="Train GPT-2 Model on Different Datasets")
+parser.add_argument('--dataset', type=str, default='vulkan', help='Dataset to use: inputtxt, fineweb, vulkan')
+args = parser.parse_args()
+
+# Set dataset_name based on the argument passed
+dataset_name = args.dataset
+
+
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -231,7 +243,7 @@ def load_tokens(filename):
     return ptt
 
 class DataLoaderLite:
-    def __init__(self, B, T, process_rank, num_processes, split):
+    def __init__(self, B, T, process_rank, num_processes, split,dataset_name):
         self.B = B
         self.T = T
         self.process_rank = process_rank
@@ -239,10 +251,20 @@ class DataLoaderLite:
         assert split in {'train', 'val'}
 
         # get the shard filenames
-        data_root = "inputtxt_dataset\shards" if USE_INPUTTXT else "edu_fineweb10B"
 
         # Get the shard filenames
-        data_root = os.path.join("inputtxt_dataset", "shards") if USE_INPUTTXT else "edu_fineweb10B"
+
+        # Dynamically select the data root based on dataset_name
+        if dataset_name == 'inputtxt':
+            data_root = os.path.join("inputtxt_dataset", "shards")
+        elif dataset_name == 'fineweb':
+            data_root = "edu_fineweb10B"
+        elif dataset_name == 'vulkan':
+            data_root = os.path.join("vulkan_dataset", "shards")
+        else:
+            raise ValueError(f"Unknown dataset: {dataset_name}")
+
+
 
         shards = os.listdir(data_root)
         print(f"Shard files found: {shards}")  # Debug print
@@ -383,15 +405,15 @@ B = 8  # micro batch size
 T = 1024 # sequence length
 # total_batch_size = 32768 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
 #total_batch_size = B * T * 32 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
-total_batch_size = B * T * 64 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
+total_batch_size = B * T * 68 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
-train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
-val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train",dataset_name = dataset_name)
+val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val",dataset_name = dataset_name)
 
 torch.set_float32_matmul_precision('high')
 
