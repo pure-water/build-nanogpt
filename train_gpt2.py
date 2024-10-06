@@ -553,7 +553,7 @@ for step in range(max_steps):
                 f.write(f"{step} hella {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except step 0, which is noise)
-    if ((step > 0 and step % 50 == 0) or last_step) and (not use_compile) :
+    if ((step > 0 and step % 20 == 0) or last_step) and (not use_compile) :
         model.eval()
         num_return_sequences = 4
         max_length = 32
