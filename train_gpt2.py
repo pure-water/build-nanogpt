@@ -405,7 +405,7 @@ B = 8  # micro batch size
 T = 1024 # sequence length
 # total_batch_size = 32768 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
 #total_batch_size = B * T * 32 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
-total_batch_size = B * T * 68 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
+total_batch_size = B * T * 16 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in number of tokens
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
@@ -432,7 +432,9 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
-max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+#max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 2000 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+print("==Note: ")
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
@@ -505,7 +507,9 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % 5000 == 0 or last_step):
+            #if step > 0 and (step % 5000 == 0 or last_step):
+
+            if step > 0 and (step % 50 == 0 or last_step):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
@@ -557,7 +561,7 @@ for step in range(max_steps):
         model.eval()
         num_return_sequences = 4
         max_length = 32
-        tokens = enc.encode("create a pipeline,")
+        tokens = enc.encode("create a draw pipeline,")
         tokens = torch.tensor(tokens, dtype=torch.long)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
         xgen = tokens.to(device)
