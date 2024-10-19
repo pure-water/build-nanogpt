@@ -147896,5 +147896,719 @@ Khronos.org and OpenGL.org.
 
 
 
+Let's talk about Animation Quality
+02/10/2024
+Attending both CVPR and SIGGRAPH this year it was interesting to observe and discuss the difference between how vision and graphics researchers approach the field of animation. There was a sense from some researchers that the reviews from the graphics communities like SIGGRAPH could be too tough, and rejected papers based on petty irrelevant issues like shadow quality. While on the other side there were feelings that the vision community are willfully ignoring problems in their results while marching forward to develop new models. And I think both of these feelings really come to the forefront on the issue of animation quality, so I thought it might be a good opportunity to examine that subject a bit more.
+
+High Quality Animation Data
+I think one of the best ways to start looking at animation quality is to look at some of the different sources of animation data in the community and compare them. For example, here is a video of some data from the Motorica Dance Dataset which is one of the highest quality publicly available datasets of motion capture in the graphics community:
 
 
+Here is another animation, this time with the skeleton visualized.
+
+
+This is the kind of data that is often typical in the AAA game and VFX industry. This data is sampled at 120 Hz, with finger and toe motions, captured with an optical system which can triangulate marker positions with sub-mm accuracy and solve onto a skeleton with realistic proportions and carefully positioned joints that accurately fit the actor. It's easy to see all of the detail and nuance that exists in data like this. The foot contacts are perfectly clean, there is no perceptual noise or foot sliding, and when skinned by a talented artist onto a well made character you get something that looks very natural and realistic with all sorts of subtle details.
+
+When I look at this kind of animation data I see it as a target. Whatever animation systems we build should aim to generate animation of this quality. But I also see it as a kind of ceiling - because when we are evaluating our methodologies, the maximum quality of the data is a bit like the sensitivity of our measuring device - once the differences become indistinguishable we can't evaluate them reliably anymore.
+
+So let's start by trying to work out some basic facts about this kind of data. What sort of precision is required when capturing, storing, or generating it?
+
+Temporal Resolution
+I'll start with the temporal dimension... and I'll keep my analysis stupidly simple here... because if you talk to someone who actually knows about signal processing, they will tell you that almost everything we do when it comes to handling the temporal aspect of animation data is already wrong - from up-sampling to down-sampling and interpolation.
+
+(For an accessible intro for graphics people as to what exactly is wrong I highly recommend Bart Wronski's blog or the classic A Pixel Is Not A Little Square. I'm also committing a bit of a sin here by drawing lines connecting the data-samples in my graphs... but all of that is a subject for another day.)
+
+Anyway, if we take this motion from the dataset:
+
+
+And plot a one second window of the shoulder rotation over time...
+
+shoulder rotation
+
+...we can see that even at 60 Hz the signal is not entirely smooth. Once we are down to 15 Hz we have a signal that is just obviously far too coarse to capture the nuances of the motion.
+
+If we plot the velocity of these signals (computed by finite difference) you can see we can get differences of over 90 degrees per second in the velocity we compute between the 60Hz signal and the 15Hz one.
+
+shoulder rotation
+
+Also take a second to note how quickly the angular velocities can change in this kind of data. Here we go from a velocity of around +150 degrees per second in one direction to -120 degrees per second in the opposite direction, within the space of 0.2 seconds. In fact, I would argue that even at 120 Hz, when we have these large peaks, the velocities are not really smooth at this sampling frequency:
+
+shoulder rotation
+
+The differences in acceleration are therefore obviously even worse, and completely degraded for the 15 Hz signal:
+
+shoulder rotation
+
+Here is an overlay of a clip of animation sampled at 60 Hz, and the same clip downsampled to 15 Hz (by taking every 4th frame) and then linearly upsampled again.
+
+
+At normal playback speed, most of the time the visual difference is fairly minimal. However if we slow the playback down we can see issues: the temporal down-sampling has introduced errors of at least several centimeters in some places.
+
+The fact is this: the reason we often deal with animation data sampled at 60 Hz is not because no higher frequency information exists and this is a sufficient frequency to record losslessly all the information in the data, but because the rate monitors refresh at is 60 Hz. As I described in my article on cubic interpolation of quaternions - as soon as we start to sample the data at other rates, unless we are careful, sampling frequency artefacts can re-appear very quickly.
+
+And I think we can conclude that although we can sometimes get away with displaying animation at lower sampling frequencies than 60 Hz without much perceptual difference, if we really want to hit the motion quality shown above, and also in terms of storage and processing, 60 Hz is already kind of the minimum we should be aiming for if we want to preserve the temporal information in the data - and that if you are planning on doing any kind of real signal processing on your data (such as frequency transformations, low-pass filters, or even extraction of velocities, accelerations, or torques) you should try to aim for higher resolution if you can.
+
+If you want a ballpark figure, this paper provides a more detailed analysis and suggests that to preserve 90% accuracy for the acceleration information at least 180 Hz is required when it comes to human motion.
+
+Numerical Precision
+So that is temporal resolution. What about in terms of the numerical precision of each frame?
+
+Here is a quick experiment that shows how important this is too. This is what our animation data looks like if I round all the quaternion floating point values to three decimal places and then re-normalize before performing the forward kinematics step:
+
+
+As you can see, with three decimal places of accuracy, the quantization error is pretty obvious (take a look at the head) and we see the character jumping discretely from pose to pose. So numerically we also need a pretty high amount of precision in our floating point values to represent each pose.
+
+Here is another similar experiment. In this case I masked out the bottom 16 bits of the floating point mantissa.
+
+
+The error is again pretty obvious. So to get perceptually accurate motion we probably need something like 10 of the 23 bits of the floating point mantissa to be correct.
+
+Obviously a huge part of this is the error propagation that we get down the joint chain... but either way, it means if we have any kind of numerical system that processes, generates, or in any way touches the local joint rotations in animation data we should make sure it is numerically accurate to as many decimal places as possible. For example, 16-bit floats are probably a no-go for animation generation if we want any chance of achieving the quality of animation shown at the beginning of this article - they are only accurate to at most five decimal places in the zero to one range (they have a 10-bit mantissa) which leaves extremely little room for error.
+
+Take a moment to consider how different this is to the image-generation domain where images are usually stored with just 8-bits of precision per channel. Not only does this mean they require much less precision as 8-bits means pixel channels can only take one of 256 values, but since humans are so much less sensitive to pixel color differences we don't even really need this - noise, quantization error, and other artefacts are often not even noticeable to the human eye anyway. As a ballpack figure I would say animation generation needs to be at least one hundred times more numerically accurate than image generation if we are dealing with local joint rotations.
+
+We can do a simple experiment to show this. Here I add Gaussian noise to the quaternions of the local joint rotations with a standard deviation of 0.001 and then re-normalize. As you can see the motion it totally broken:
+
+
+On the other hand, starting with this image...
+
+tomatoes original
+
+Here is what I get if I add noise with a standard deviation of 0.01. The different is barely noticeable...
+
+tomatoes noisy
+
+So to summarize: if we want to produce animation with the quality shown at the beginning of this article, 60 Hz is really the minimum frequency we should be dealing with when it comes to the temporal resolution, and we need numerical accuracy of at least five or six decimal places on our local joint rotations. Anything less than that and we can already expect to be producing visible errors.
+
+Data Issues
+Now that we have an idea of what high quality motion capture data looks like and what the constraints are, let's take a look at some of the other data sets in the community.
+
+First a brief disclaimer: my goal is not to be critical of these datasets. They have been incredible workhorses for the vision and graphics communities and I really appreciate all the work that has gone into them from so many people. I've used them extensively in my own papers! My goal here is simply to talk about some of the issues you might face when trying to use them as a researcher.
+
+For example, let's look at some data from the MOYO yoga part of the AMASS dataset. Here I have extracted the skeleton via the regression method. I'm going to put it on a skinned character too, but first let's look at just the skeletal data itself:
+
+We'll start with the obvious problems and the first one is right there - the rest pose:
+
+
+I'm unconvinced that the actor had their knees bent outward like that when they were doing a T-pose. That means we already have some kind of constant systematic error in our data when it comes to joint rotations and positioning. Not only is that going to make it difficult to skin and retarget this data but having such a large systematic error right from the start doesn't give us much confidence regarding what else might have gone wrong with the capture and processing.
+
+The next most obvious issue is that the character's feet penetrate the floor. This fix is more simple - we just need to vertically translated the character in all the data. No big deal - but it does mean we can't just naively throw this data into a network along with a bunch of other data without manual correction and cleaning.
+
+Third is that the data is missing hand, finger, and toe movements - although that is pretty common for most publicly available datasets.
+
+If we browse a few of the clips in this dataset we can see there are many places where we have glitches and jitters:
+
+
+All of these sections should be trimmed from the database before training. These kind of glitches and outliers can be really damaging to training of a neural network and often causing exploding gradients and NaNs to appear in losses. Techniques like gradient clipping often hide/handle these kinds of data issues but even with that, there can be big negative affects on things such as normalization.
+
+Lots of the clips also have more subtle issues like this kind of low level noise that is very hard to spot (take a look at the spine about 5 seconds in):
+
+
+We can remove this noise by filtering the data, but as discussed earlier, at a sampling rate of 60 Hz we cannot perfectly capture the fastest component of human motion. This means that there is important motion information encoded in the higher frequencies of our signal. Applying any low-pass filter for denoising would also inevitably erase parts of the actual signal.
+
+rotation noise
+
+For example, if I apply this same Gaussian filter to the Motorica data we can see it can end up modifying the data by several centimeters in places and removes some subtle details. Here look at how the hand motion gets smoothed out:
+
+
+I've done my best to retarget a medium-sized AMASS skeleton to the UE5 Manny so we can see some of the issues on the same skinned character. This is obviously not a perfect comparison, but nonetheless on a skinned character a whole new domain of artefacts become visible. Obviously we have missing finger and toe motion, but we also can see some joints don't twist properly, sometimes the spine pops in a weird way, we get odd shoulder motion, or the feet slide a lot.
+
+
+Large parts of the CMU motion capture database (which AMASS contains) and many of the other large databases we use in graphics contain similar issues. Here are a few random clips from the CMU portion of AMASS where we can see all sorts of artefacts. Again, this is not an exactly fair comparison since I struggled to build a retargeting setup which worked well given the variety of rest poses in the data - and of course I have cherry picked some bad examples - but it still gives you an idea of the data.
+
+
+As I mentioned before - I really appreciate the work that has gone into these kinds of datasets which have been powering the academic community for a long time and led to a huge amount of progress. But these datasets also come with some downsides:
+
+First, data of this quality is simply too far off being practically usable in the video games or VFX industry. This immediately makes it very hard to evaluate fairly the practicality of the proposed method since we simply don't know how it might behave when trained on higher quality data.
+
+Second, when examining the animation generated by a system trained on this kind of data it becomes impossible to distinguish between animation artifacts caused by the method itself, and those which are present in the training data and the system is just faithfully reproducing.
+
+Third, when systems trained on this kind of data report error metrics such as joint position improvements of a few centimeters or small improvements to the FID score, given we know the ground truth data has obvious systematic errors on the order of tens of centimeters as well as other glitches and noise, it brings into question if these kind of metric differences are even meaningful any longer.
+
+Mixed Data
+An argument I've heard often is this: Does it really matter if the quality is variable when there is so much more data in databases like AMASS than there are in other datasets? Can't I train a model on a large dataset of low quality motion and then fine-tune it on the high quality data? The mantra we hear a lot in deep learning for this kind of training regime is "Noise cancels out, signal adds up" - which is absolutely true.
+
+I think this is a very interesting argument, and it's an approach which has worked fantastically in other domains (Speech Synthesis being one example). There are a lot of very smart people in the field betting on this kind of idea and I will be interested to see what kind of results it produces.
+
+While I still don't really know if this will work, my gut feels skeptical. In my experience most of the time when you combine two animation datasets, you end up with a multi-modal dataset made up of two clusters that don't necessarily interact properly with each other.
+
+In fact, we can somewhat see this already, because AMASS is a collection of many different datasets and capture sessions. If we look at the rest pose from part of the CMU portion of the AMASS dataset:
+
+
+And then look at the rest pose from the Yoga portion:
+
+
+We can see already just by eyeballing that depending on which session the data comes from the whole rest pose is completely different. If we train a model on this data it is going to need to learn how to switch between different styles of rest pose depending on what kind of motion we are asking it to produce as output. These datasets might be on the same skeleton structure but that does not mean they are "combined".
+
+To me, the idea that taking a system trained on low quality dancing data (for example), training it on high quality locomotion data, and expecting it to produce high quality dancing data (and not low quality dancing data) seems like wishful thinking. To put it bluntly, the common mantra which much more reflects my experience with deep learning is this one: "garbage in, garbage out".
+
+As mentioned at the beginning of the article, I like to think of the training data as your ceiling. It represents the best possible quality you can expect to produce from your model, which in most cases you will only be able to approach exponentially. That is why targeting the highest quality source data and preserving that quality through processing steps is so important.
+
+In fact, I often find that as soon as you put animation data into a neural network in any form you can expect some loss in quality. We can see this by training a very simple auto-encoder on the high quality data from the Motorica dataset we showed before:
+
+(In red is the ground truth and in green is the reproduction.)
+
+
+Even after some careful training which accounts for errors propagating down the joint chain, we still get some error in the autoencoder's reconstructions on the training set which manifest in small amounts of foot sliding and other posing errors.
+
+In this case I used 8 layers of 512 neurons for both the encoder and decoder and a 256-dimensional latent space. Perhaps my network was just not large enough? More layers generally equals better right? Well in this case the opposite is true. In fact, we can get almost perfect reproductions if we just use 2 layers instead of 8:
+
+
+So not only can quality degrade as soon as we enter any kind of neural network, but it seems that the more layers that data passes through the worse things are.
+
+All of these sources of error accumulate and propagate and obfuscate our ability to evaluate methods and architectural differences objectively and fairly. Methods that produce foot sliding on top of data (or other methods) that already have foot sliding, hide the foot sliding they introduce, and make the sources of error infinitely more difficult to decouple and attribute to specific methodological decisions.
+
+Also, the models we train end up wasting their capacity learning to emulate the errors, noise, multiple-modes, artefacts, and whatever other undesirable things might be in the data. For example, here is the same 2 layer auto-encoder trained on of our AMASS yoga data:
+
+
+Now all of the care we took to retain precision is working against us because we're attempting to reproduce the errors and noise. If we're not careful you can see how easy it would be to come to the wrong conclusion about model architectures. Even with this basic example we're in a situation where with good data quality we might conclude "more layers = worse", while with poor data quality "more layers = better" (as, for example, it might remove the noise more).
+
+It might seem like I am nit-picking on tiny issues, and that errors of a couple of centimeters here are there are really just not a big deal compared to the new opportunities that Machine Learning opens up... but a lesson I think we can learn from the rendering community is that hacks, approximations, and other sources of errors might not seem like a big deal - until suddenly they are - because at some point you end up with a final result that looks like a hot mess - and you have no idea what to do - because you have hundreds of different sources of errors, none of which you really understand or can control - compounding together in a deeply complex way. That is the situation the rendering folks have been untying over the last 15 years.
+
+Before Deep Learning
+When talking about animation quality it's a good exercise to go back and look at SIGGRAPH papers from 10 years ago before deep learning started to take off. Here is a selection of my favorites:
+
+
+
+Motion Fields for Interactive Character Animation (2010)
+
+
+
+Terrain Runner: Control, Parameterization, Composition, and Planning for Highly Dynamic Motions (2013)
+
+
+
+Continuous Character Control with Low-Dimensional Embeddings (2012)
+
+
+Data-driven Finger Motion Synthesis for Gesturing Characters (2012)
+
+
+
+Realtime Style Transfer for Unlabeled Heterogeneous Human Motion (2015)
+
+Although all these methods have issues (and there were lots of papers from this time which did not look nearly as good), in many ways, in terms of pure animation quality what they produced is better than some of the results from deep learning methods we see now. In the very least, the animation they produce is almost always clean and artefact free: it does not have noise, or jumps and jitters, and in general it does not even contain much foot sliding.
+
+If our newer methods cannot attain this quality bar then the elephant in the room is that we may not actually be making progress in the field - we might just be trading off one thing for another.
+
+So let's talk more about animation quality - let's work out how to tackle it and not try push it under the rug because it is an inconvenient topic when it comes to publishing animation papers that use deep learning.
+Improving Animation Quality
+So what can we do to try and improve animation quality across the board?
+
+I think those of us in the industry have some responsibility here. Almost all games and VFX companies don't share their data with the academic world (with the exception of Ubisoft who have released some very high quality animation datasets), so how can we penalize academics for not reaching a bar they don't even know exists? We need to make more of an effort to share what we can, not just our data, but also our processes and considerations when we capture it.
+
+And because I believe in putting your money where your mouth is I've done a few things in preparation for this blog post that I hope will help:
+
+1) I've skinned a simple character (to the best of my limited abilities) to the skeleton used in Ubisoft's ZeroEGGS dataset to provide a clean and clear way to evaluate overall motion quality including fingers, toes, hand and feet contacts.
+
+
+2) I've spent some time re-solving in MotionBuilder Ubisoft's LaFAN dataset from the original marker data and preparing a new version which is better quality and closer to what we used internally: it has toe and finger motion (at least one marker's worth of finger motion), is more carefully retargeted to this new skeleton, and is solved at 60fps instead of 30fps. Given I'm not a MotionBuilder expert, and the limited finger markers in the original data, the result is still far from perfect - but I hope it can provide a reasonable baseline for researchers given the size and diversity of the dataset. You can find it here.
+
+
+3) I've retargeted the Motorica Dance Dataset to this skeleton in MotionBuilder so that it can be combined with the previous two datasets. You can find it here.
+
+
+4) I've also done a basic adjustment of the ZeroEGGS dataset so that it looks correct on this new simple character. You can find it here.
+
+
+That gives us at least three large datasets all on a common character skeleton with fingers, toes, and a skinned mesh, covering Dance, Speech, and everything in LaFAN. I hope that can be considered a pretty good starting point for anyone who is interested in improving the motion quality in their animation research.
+
+Finally, if anyone else releases simliar quality datasets I promise I will also make a good attempt to retarget it to the same setup.
+
+With that said, I think there are things to be done in the academic world too. We need to strike a balance between rewarding risk-taking, innovation, and unique ideas - but we also need to make sure we don't lower the bar to the point where our results become irrelevant to the industry or we lose the ability to evaluate what works and what doesn't. Most importantly: let us not avoid the discussion of animation quality just because it may be inconvenient for publishing.
+
+Friendly Reminder: All of these datasets are NOT licensed for commercial use. They are for research use only. The quickest way to ruin any good-will from the industry in terms of releasing data is to use this data (or models trained on this data) in a commercial product without acquiring a commercial license from the original owners of the datasets.
+Conclusion
+I'd like to end on something more philosophical.
+
+There has been a huge amount of change in the tech world over the last 10 years and almost all companies (including the one I work for) are shifting their focus away from being content creators, to being storefront owners and algorithmic content curators. The new business model is this: instead of employing the best artists and creators you can find to make content, you instead pay your users to create the content (be that apps, games, videos, recipes, whatever), and that content is then evaluated and filtered algorithmically for other users - not based on some subjective evaluation of quality - but based on how much it engagement it generates.
+
+The automated, engagement based nature of this process has created a race to the bottom. YouTube users are creating hundreds of brain-hacking Spiderman-Elsa videos to farm views from undeveloped minds. Game developers are auto-generating thousands of gambling games for the Apple app store. Everything is being flooded with low-quality, engagement-hacking crap. The people who are actually trying to build quality content are being forced to sink or swim - optimize for engagement or else be forgotten.
+
+There are many people involved in deep learning who are trying very hard to sell you the idea that in this new world of big-data, recommendation algorithms, large language models, and deep learning, quantity is the only thing that matters: more data, more GPUs, more papers, more students, more layers, more neurons, more users, more hours of engagement. Take a second to consider why it might be in the interests of the people shouting this the loudest, to convince everyone it is really true.
+
+But ask almost anyone what they actually want in this world and they will say the opposite. They want less content, of higher quality.
+
+And if that is what all of us want, then that is what we need to try and do: focus on producing quality content ourselves, and reward others when they do so too.
+
+
+
+Building Real-Time Global Illumination
+Radiance Cascades
+An Interactive Walkthrough
+
+This is the second post in a series. Checkout the first post, which walks through raymarching, the jump flood algorithm, distance fields, and a noise-based global illumination method. We use them all again here!
+
+This is what we will build in this post. It's noiseless, real-time global illumination. The real deal.
+
+Drag around inside!
+
+Colors on the right - try toggling the sun!
+
+Additional Controls
+
+▶
+
+
+
+
+
+
+
+
+
+
+Swap to Falling Sand
+
+
+Want a bigger canvas?
+
+Performance Issues?
+
+Why is the previous post's approach naive?
+So last time we left off with a method that sent N rays in equidistant directions about a unit circle, with a bit of noise added whenever we pick a direction to cast a ray. Each ray marches until it hits something, leveraging sphere marching via a distance field to jump as far as possible with high certainty that nothing would be missed or jumped over. The stopping condition is hand-wavy, just some epsilon value - which we'll improve on.
+
+In that post we used 32 rays - that's pretty low accuracy, which shows. We try to cover up with style and temporal accumulation. It should be noted that it could look much smoother using the same method. If we were to cast many more rays per pixel, say, 512 or 1024, use a more appropriate type of noise, and some additional smoothing... but it would no longer run in real-time in common cases - especially at large resolutions.
+
+Take a look at the impact and look that noise has, and how smooth our GI can get at high ray counts.
+
+
+Ray Count
+32
+
+▶
+
+
+
+
+
+
+
+
+
+
+
+An important question to ask is certainly, "do we care about noise?" If you like the aesthetic of noise or otherwise don't mind it, you can make the decision to use noise based methods. It inherently comes with inaccuracy alongside the visual artifacts. But, put the slider at 16 rays. This is roughly the cost of radiance cascades, yet the end result has no noise. Pretty crazy.
+
+Let's take a moment to talk about how many rays we're casting to get a sense of the computation we're performing every frame. Let's say we have a 1024 x 1024 canvas - that's roughly 1M pixels. If we're casting 512 (on the low side of nice and smooth) that's ~500M rays cast every frame. Because we added some great performance savings by creating distance fields, we only need to take (on the order of) 10 steps per ray - and really the most computationally expensive operation is a texture lookup which we do once to figure out if we need to perform a raymarch and once if we hit something - so let's call that roughly 2 texture lookups per cast ray totaling around 1B texture lookups. Even if we can perform a texture lookup in a nanosecond (likely slower), we're looking at a full second per frame. To run at just 60fps, we need to get that down to ~16ms. So roughly 100x faster.
+
+How can we simplify the amount of work we need to do without sacrificing quality?
+
+
+Penumbra hypothesis
+It turns out, there's an idea called the "penumbra hypothesis" which provides critical insight that we'll leverage to dramatically reduce the amount of computational effort required.
+
+The idea has two parts.
+
+When a shadow is cast:
+
+The necessary linear (spatial in pixel space) resolution to accurately capture some area of it is inversely proportional to that area's distance from the origin.
+The necessary angular resolution to accurately capture some area of it is proportional to that area's distance from the origin.
+Below is a scene that illustrates a penumbra.
+
+
+▶
+
+
+
+
+
+Observe the shape and color of the shadow as it extends away from the left edge of the drawn black opaque line. There's kind of two parts - the dark area on the right, and the area on the left that gets softer the further left you look. That softening center area is shaped like a cone (or triangle) and called the penumbra. (wikipedia has some nice labeled diagrams too).
+
+Like all other canvases, if you want to get the original back, just hit the little refresh button in the bottom right.
+
+So to put the penumbra hypothesis above into more familiar terms, given some pixel, to accurately represent its radiance (its rgba value) we need to collect light from all light sources in our scene. The further away a light source is, the more angular resolution and less linear (spatial pixel) resolution is required. In other words, the more rays we need to cast and the fewer individual pixels we need to look at.
+
+If we observe that shadow in our illustration of the penumbra above, we can kind of see why that's the case in regard to the linear resolution. The shadow's left edge is quite sharp near the left edge of the black line and it's pretty hard to tell where exactly it becomes the same color as the background (or if it does).
+
+As far as angular resolution, we can easily see the sense behind this condition by changing our ray count down to 4 in our previous canvas and placing a black dot in a dark area that should be illuminated, then increasing the ray count step by step. We can see how the dot can easily be lost or misrepresented if far enough away and the ray count isn't high enough.
+
+So. More rays at lower resolution the further away a light source is...
+
+Currently, our previous method casts the same number of rays from every pixel, and operates only according to the scene resolution.
+
+So, how do we dynamically increase the number of rays cast mid raymarch? Sounds like some sort of branching operation which doesn't sound particularly gpu friendly.
+
+Also, reducing linear resolution sounds like taking bigger steps as we get further from our origin during our raymarch, but we swapped to using a distance field, not stepping pixel by pixel like we did in our very first implementation. So how would we reduce our linear resolution as we get further away? Isn't it optimized already?
+
+
+Codifying the penumbra hypothesis
+So instead of dynamically increasing rays mid cast / branching, let's break down our global illumination process into multiple passes. We'll do a high resolution pass with fewer rays, and a lower resolution pass with more rays. According to the penumbra hypothesis, that should more accurately model how lights / shadows behave.
+
+So to start - we need our distance field texture and our scene texture (same as before). But this time we'll also need to keep around a lastTexture that we'll use to keep around the previous pass.
+
+rcPass(distanceFieldTexture, drawPassTexture) {
+  uniforms.distanceTexture.value = distanceFieldTexture;
+  uniforms.sceneTexture.value = drawPassTexture;
+  uniforms.lastTexture.value = null;
+
+  // ping-pong rendering
+}
+We need to be able to pass the previous raymarch pass into the next, so we'll setup a for loop using a ping-pong strategy and two render targets just like when we made our multi-pass JFA.
+
+We'll start with the highest ray count, lowest resolution layer, (256 rays and 1/16th resolution). Then we'll do our low ray count, high resolution render.
+
+// ping-pong rendering
+for (let i = 2; i >= 1; i--) {
+  uniforms.rayCount.value = Math.pow(uniforms.baseRayCount.value, i);
+
+  if (i > 1) {
+    renderer.setRenderTarget(rcRenderTargets[prev]);
+    rcRender();
+    uniforms.lastTexture.value = rcRenderTargets[prev].texture;
+    prev = 1 - prev;
+  } else {
+    uniforms.rayCount.value = uniforms.baseRayCount.value;
+    renderer.setRenderTarget(null);
+    rcRender();
+  }
+}
+In the shader, we're going to make 3 modifications to our original naive gi shader.
+
+Add the ability to render at a lower resolution
+Add the ability to merge with a previous pass
+Add the ability to start and stop at a specified distance from the origin of the raymarch.
+That last modifications models the behavior in the penumbra hypothesis that describes how the required resolution drops and required ray count increases as you move further away. To model that behavior, we need to be able to tell our shader to march between a specified interval.
+
+So starting with rendering at a lower resolution - let's just try something out.
+
+Let's cut our resolution in half (floor each pixel to half).
+
+  vec2 coord = uv * resolution;
+
+  bool isLastLayer = rayCount == baseRayCount;
+  vec2 effectiveUv = isLastLayer ? uv : floor(coord / 2.0) * 2.0 / resolution;
+Let's decide where to cast our ray from and how far it should travel. We'll arbitrarily decide on 1/8th of the UV space (screen) and the end will be the longest possible sqrt(2.0). If it's our low-res pass, start at partial otherwise only go until partial.
+
+float partial = 0.125;
+float intervalStart = rayCount == baseRayCount ? 0.0 : partial;
+float intervalEnd = rayCount == baseRayCount ? partial : sqrt(2.0);
+And now our core raymarch loop (mostly reiterating) but no noise this time!
+
+// Shoot rays in "rayCount" directions, equally spaced, NO ADDED RANDOMNESS.
+for (int i = 0; i < rayCount; i++) {
+    float index = float(i);
+    // Add 0.5 radians to avoid vertical angles
+    float angleStep = (index + 0.5);
+    float angle = angleStepSize * angleStep;
+    vec2 rayDirection = vec2(cos(angle), -sin(angle));
+
+    // Start in our decided starting location
+    vec2 sampleUv = effectiveUv + rayDirection * intervalStart * scale;
+    // Keep track of how far we've gone
+    float traveled = intervalStart;
+    vec4 radDelta = vec4(0.0);
+And when we actually take our steps along the ray...
+
+    // (Existing loop, but to reiterate, we're raymarching)
+    for (int step = 1; step < maxSteps; step++) {
+      // How far away is the nearest object?
+      float dist = texture(distanceTexture, effectiveUv).r;
+
+      // Go the direction we're traveling
+      sampleUv += rayDirection * dist * scale;
+
+      if (outOfBounds(sampleUv)) break;
+
+      // Read if our distance field tells us to!
+      if (dist < minStepSize) {
+          // Accumulate radiance or shadow!
+          vec4 colorSample = texture(sceneTexture, sampleUv);
+          radDelta += vec4(pow(colorSample.rgb, vec3(srgb)), 1.0);
+          break;
+      }
+
+      // Stop if we've gone our interval length!
+      traveled += dist;
+      if (traveled >= intervalEnd) break;
+    }
+
+    // Accumulate total radiance
+    radiance += radDelta;
+}
+And then same as before, we set the pixel to the final radiance... We also corrected sRGB here as well to make it easier to see all the rays (more on that in a bit)
+
+vec3 final = radiance.rgb * oneOverRayCount;
+vec3 correctSRGB = pow(final, vec3(1.0 / 2.2));
+
+FragColor = vec4(correctSRGB, 1.0);
+Here's what that looks like:
+
+
+Base Ray Count
+16
+
+▶
+
+
+
+
+
+
+
+
+
+
+
+Packing Direction in Pixels
+We can first notice the two (radiance) cascades (or layers) we now have. One in the background and one in the foreground. The one in the background has some crazy designs and a hole in the middle. The one in the foreground has clearly visible rays extending from the light source just over the circular hole in background.
+
+We should be careful with language - as we know rays don't extend from the light source, but actually start from what could be perceived as the "end" of the ray "coming out" of the light source and are cast in different directions, one of which hit the light source and thus was illuminated.
+
+Let's swap the base ray count between 4 and 16 and paint around a bit.
+
+Note that our ray counts are 4 rays up close and 16 further away or 16 up close and 256 further away.
+
+When we drag around light, that upper / background layer looks very reasonable- a bit pixelated, but better than the white noise from earlier.
+
+When we draw shadows, they look offset proportional to the offset of the upper interval. But let's not worry about that for a moment...
+
+So that's 256 rays at half resolution. And our core loop through ray angles did 256 rays for every pixel - but because we cut our resolution in half, 3 out of every 4 rays we marched were redundant. Woah!
+
+And that's a key insight in radiance cascades. Specifically for our case - what if we split up the rays we need to cast? Instead of doing half resolution, let's do 1/4th resolution (which is every 16 total pixels) and instead of casting 256 rays per pixel, cast 16 rays for every pixel, offsetting by TAU / 16 incrementally per pixel.
+
+This group of pixels is called a "probe" in radiance cascades.
+
+Let's make the changes.
+
+Our baseRayCount is either 4 or 16 in our running example.
+
+So let's define all our variables.
+
+// A handy term we use in other calculations
+float sqrtBase = sqrt(float(baseRayCount));
+// The width / space between probes
+// If our `baseRayCount` is 16, this is 4 on the upper cascade or 1 on the lower.
+float spacing = rayCount == baseRayCount ? 1.0 : sqrtBase;
+// Calculate the number of probes per x/y dimension
+vec2 size = floor(resolution / spacing);
+// Calculate which probe we're processing this pass
+vec2 probeRelativePosition = mod(coord, size);
+// Calculate which group of rays we're processing this pass
+vec2 rayPos = floor(coord / size);
+// Calculate the index of the set of rays we're processing
+float baseIndex = float(baseRayCount) * (rayPos.x + (spacing * rayPos.y));
+// Calculate the size of our angle step
+float angleStepSize = TAU / float(rayCount);
+// Find the center of the probe we're processing
+vec2 probeCenter = (probeRelativePosition + 0.5) * spacing;
+It's a fair amount of new complexity, but we're just encoding our base ray count (4 or 16) rays into each pixel for a downsampled version of our texture.
+
+Then when we actually do our raymarching step, we only need to cast rays baseRayCount times per pixel.
+
+// Shoot rays in "rayCount" directions, equally spaced
+for (int i = 0; i < baseRayCount; i++) {
+  float index = baseIndex + float(i);
+  float angleStep = index + 0.5;
+  // Same as before from here out
+}
+In our first pass (upper cascade / background layer), we'll end up casting 256 rays total from each group of 16 pixels (probe), all from the same point - specifically the center of the probe.
+
+In our second pass (lower cascade / foreground layer), we'll cast 16 rays total from each pixel (probe again), all from the same point - again, from the center.
+
+That is a total cost of 2 x 16 ray raymarches - the same cost as our 32 ray raymarch, and the penumbra hypothesis says it will be more accurate (and hopefully look better - we're using an angular resolution of 256 rays instead of 32).
+
+But at what point do we swap from the low ray, high spatial resolution to high ray low spatial resolution? We'll make "Interval Split" a slider and play with it.
+
+// Calculate our intervals based on an input `intervalSplit`
+float intervalStart = rayCount == baseRayCount ? 0.0 : intervalSplit;
+// End at the split or the max possible (in uv) sqrt(2.0)
+float intervalEnd = rayCount == baseRayCount ? intervalSplit : sqrt(2.0);
+No changes needed to how we leveraged them. But we do need to "merge" them, as in, when we get to the lower cascade, we need to read from the upper cascade, which is stored differently than a normal texture.
+
+So first things first - we only want to read the upper cascade from the lower layer (there's no layer above the upper cascade) and we only want to do it if we're in an empty area. If we already have light, there's no reason to read from the upper cascade. We already hit something (which we know will be closer).
+
+bool nonOpaque = radDelta.a == 0.0;
+
+// Only merge on non-opaque areas
+if (firstLevel && nonOpaque) {
+Once we know we need to merge, we need to decode our encoded texture.
+
+So we store 16 different directions (assuming a base of 16) in 16 different quadrants of our texture. That's a 4 x 4 grid. Once we calculate that we can find our current position by modding and dividing (and flooring) the index with sqrtBase (4) to find our x and y terms. Then multiply them by the size of a quadrant that we just calculated.
+
+// The spacing between probes
+vec2 upperSpacing = sqrtBase;
+// Grid of probes
+vec2 upperSize = floor(resolution / upperSpacing);
+// Position of _this_ probe
+vec2 upperPosition = vec2(
+  mod(index, sqrtBase), floor(index / upperSpacing)
+) * upperSize;
+Next we offset where we sample from by the center of the current layers probe relative to the upper probe.
+
+vec2 offset = (probeRelativePosition + 0.5) / sqrtBase;
+vec2 upperUv = (upperPosition + offset) / resolution
+And finally we accumulate radiance from our previous texture at the calculated upperUv.
+
+radDelta += texture(lastTexture, upperUv);
+And here it is.
+
+
+
+Base Ray Count
+16
+Cascade Index
+0
+Interval Split
+0.125
+
+▶
+
+
+
+
+
+
+
+
+
+
+
+Nailing the Details
+Take a moment and swap between "Cascade Index" 0 and 1. When we set it to 1, we render the upper cascade texture directly. That is how it is stored. (starts from bottom left, then goes to the right and then up a row, then to the right etc.) Notice the clockwise rotation.
+
+In general, our new canvas looks relatively similar to the previous canvas, but the upper cascade is clearly lower resolution. If we paint around though, it looks just as good. And if we lower the "Interval Split" a bunch, it looks even better. (shadows look reasonable now too)
+
+There's a pretty clear issue though. Because we're sampling from the upper layer, we're getting a rather large pixelated grid pattern. And this makes sense as we're sampling from a single point for a group of pixels. We can smooth this out without extra work by setting the render target to use a linear filter. This means the gpu will upscale the upper cascade using bilinear interpolation giving us nearly free smoothing. There's a checkbox to compare with and without using a linear filter on the upper cascade. Once we enable it, things are really starting to look good.
+
+Playing a bit with the Interval Split, the ideal split seems to be pretty close to zero, but clearly not 0 (after drawing some light and shadow lines). ~0.02 (or like 8 pixels) looks a bit too long, but reasonable. Which is about half (or the radius) of 16 pixels. And the probe width is 16 pixels - and we're casting it from the center. So we'll need to keep experimenting but let's say that were our "rule" to determine interval length for a moment... So far we've been talking about this all as just a split.
+
+Let's say we used our rule (which is probably too long), 16 x 8 pixels is 128 pixels. Our upper cascade is 256 rays, so it should use an interval that ends at 128 pixels. We'd need another layer - which would have pixel groups of 256 x 256 pixels - so (according to our rule) 256 x 128 pixels max, which is 32K, and beyond any canvas we'd use.
+
+Let's codify that, and we'll also make sure it works for a base ray count of 4 - which will require more layers (we could calculate that too).
+
+
+Generalizing to Many Cascades
+We'll need new variables like cascadeIndex and cascadeCount which will pass in from the CPU...
+
+But let's first figure out / codify our interval length, as this determines how many cascades we'll need.
+
+Let's try basing everything off of our baseRayCount - we'll call it base.
+
+Our lowest cascade (index of 0) starts at the center of our probe - that's easy. And for the length - let's have it just go 1 pixel - so 1 divided by shortest side of our resolution - and we'll scale steps by the ratio of the shortest side over resolution.
+
+As we go up in cascade size, we need to scale by some amount. A mathematically simple way to scale is just to start at pow(base, cascadeIndex - 2.0) where cascadeIndex
+
+float shortestSide = min(resolution.x, resolution.y);
+// Multiply steps by this to ensure unit circle with non-square resolution
+vec2 scale = shortestSide / resolution;
+
+float intervalStart = cascadeIndex == 0.0 ? 0.0 : (
+  pow(base, cascadeIndex - 1.0)
+) / shortestSide;
+float intervalLength = pow(base, cascadeIndex) / shortestSide;
+We also need to generalize a couple of other variables to be based on cascadeIndex.
+
+Ray count is just base ^ (cascadeIndex + 1) - as the lowest layer is just base, then the next is base * base and so on. Similarly, the spacing for the current layer starts with 1, then is a total of base pixels which is sqrtBase on each dimension. And then sqrtBase * sqrtBase and so on.
+
+float rayCount = pow(base, cascadeIndex + 1.0);
+float spacing = pow(sqrtBase, cascadeIndex);
+And finally we need to update our merging logic. It's actually really easy due to the effort we put in on the previous canvas - we just need to generalize when we perform it (as long as we aren't processing the upper-most cascade) and then generalize upperSpacing.
+
+And, it's just the probe spacing of the upper cascade!
+
+if (cascadeIndex < cascadeCount - 1.0 && nonOpaque) {
+  float upperSpacing = pow(sqrtBase, cascadeIndex + 1.0);
+Alright - back to cascadeCount and cascadeIndex - we need to calculate and pass those is on the CPU side. Let's modify our logic to figure out how many cascades we need.
+
+Well, say we have 300 x 400 - we know our longest possible ray length is 500 (it's a pythagorean triple after all - so the longest possible line is 500 pixels, which is our longest possible ray). Using a base of 4 - log base 4 of 500 is roughly 4.5, so we'll need a minimum of 5 cascades...
+
+But when we place a light point in the very top-left and limit to 5 cascades, we see that our longest interval doesn't reach the edge. So there's clearly an issue. In the short term, we're going to solve it in the most naive way possible. Add an extra cascade.
+
+rcPass(distanceFieldTexture, drawPassTexture) {
+  // initialize variables from before
+
+  const diagonal = Math.sqrt(
+    width * width + height * height
+  );
+
+  // Our calculation for number of cascades
+  cascadeCount = Math.ceil(
+    Math.log(diagonal) / Math.log(uniforms.base.value)
+  ) + 1;
+
+  uniforms.cascadeCount.value = cascadeCount;
+
+  for (let i = cascadeCount - 1; i >= 0; i--) {
+    uniforms.cascadeIndex.value = i;
+
+    // Same as before
+  }
+}
+A fix we'll also discuss here, which we used in the last demo is - whenever we read a texture from the drawn scene, we take it from sRGB space and turn it into linear space, then apply our lighting, and then turn it back into sRGB. This produces a much brighter (accurate) result. It also illuminates a clear ringing artifact of vanilla radiance cascades. We'll do this with the approximate version of vec3(2.2) when reading and vec3(1.0 / 2.2) when writing. Ths reason behind this is WebGL uses sRGB and we want to work with colors in linear space. Here's a great shadertoy which demonstrates a simple example of why we should work with color in linear space instead of sRGB space.
+
+In our raymarching:
+
+vec4 colorSample = texture(sceneTexture, sampleUv);
+radDelta += vec4(
+  pow(colorSample.rgb, vec3(srgb)),
+  colorSample.a
+);
+And our final output:
+
+FragColor = vec4(
+  !(cascadeIndex > firstCascadeIndex)
+    ? totalRadiance.rgb
+    : pow(totalRadiance.rgb, vec3(1.0 / srgb)),
+  1.0
+);
+Another small fix - it's possible to leak light from one side to the other during the merge step, so let's clamp appropriately to not allow this. You can see this by turning the interval split to zero and drawing along an edge in the previous canvas.
+
+// (From before)
+vec2 offset = (probeRelativePosition + 0.5) / sqrtBase;
+// Clamp to ensure we don't go outside of any edge
+vec2 clamped = clamp(offset, vec2(0.5), upperSize - 0.5);
+// And add the clamped offset
+vec2 upperUv = (upperPosition + clamped) / resolution
+Let's check it out!
+
+
+
+Base Ray Count
+4
+Cascade Index
+0
+
+▶
+
+
+
+
+
+
+
+
+
+
+
+And at this point, this looks genuinely reasonable - if you paint around. But if you make a single dot, like it's setup by default, especially with "Correct SRGB" checked, there are some serious ringing artifacts!
+
+And this is still an active area of research. There are a number of approaches to fixing this ringing, but many of them incur a fair amount of overhead (as in doubling the frame time) or cause other artifacts, etc.
+
+And this isn't the only area of active research - pretty much the entire approach is still being actively worked on over in the discord. People are also working on various approaches to Radiance Cascades in 3D. Pretty exciting stuff!
+
+Now that you get it, go checkout the final canvas at the top and see what all the different levers and knobs do in "Additional Controls".
+
+Acknowledgements / Resources
+In general, the folks in the Graphics Programming Discord, Radiance Cascades thread were incredibly helpful while I was learning. The creator of Radiance Cascades, Alexander Sannikov, gave great feedback on the issues my implementations had, along with Yaazarai, fad, tmpvar, Mytino, Goobley, Sam and many others, either directly or indirectly. I really liked how Yaazarai approached building Radiance Cascades and his work had the biggest direct influence on this work and post.
+
+Radiance Cascades Paper
+Yaazarai's Blog Post
+The official discord
+Appendix: Penumbra with Radiance Cascades
+Let's examine what our penumbra looks like with our new method.
+
+It has subtly ringing artifacts in the shadow we saw above, but otherwise looks quite clean and is incredibly cheap to compute in comparison.
+
+
+▶
+
+
+
+
+
+Appendix: Additional Hacks
+I actually snuck in one more hack. I either have a bug somewhere or am missing something regarding bases other than 4. As you can see the artifacts are much worse at 16. So I added this hack which helped a lot. This further enforces that some of the hand-waving we did earlier can be improved. We just multiply the interval and interval lengths by a small amount for larger bases.
+
+// Hand-wavy rule that improved smoothing of other base ray counts
+float modifierHack = base < 16.0 ? 1.0 : sqrtBase;
