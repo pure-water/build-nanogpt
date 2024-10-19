@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from hellaswag import render_example, iterate_examples
+import glob
 # -----------------------------------------------------------------------------
 
 USE_INPUTTXT = True  # Set to True to use the shard-based dataset, False for the original dataset
@@ -398,6 +399,11 @@ if torch.cuda.is_available():
 
 enc = tiktoken.get_encoding("gpt2")
 
+#########################################################
+## Training Setup
+#########################################################
+
+##
 #B = 64 # micro batch size
 #B = 16 # micro batch size
 #For T4 16G Memory
@@ -429,12 +435,30 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
+# Decode steps
+
+# Load latest checkpoint if available
+latest_checkpoint = max(glob.glob(os.path.join(log_dir, "model_*.pt")), key=os.path.getctime, default=None)
+
+if latest_checkpoint:
+    checkpoint = torch.load(latest_checkpoint, map_location=device)
+    raw_model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint.get('optimizer', optimizer.state_dict()))
+    start_step = checkpoint.get('step', 0) + 1
+    print(f"Loaded checkpoint '{latest_checkpoint}' (step {start_step})")
+else:
+    start_step = 0
+    print("No checkpoint found, starting training from scratch.")
+
+
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
 #max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
-max_steps = 2000 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
-print("==Note: ")
+max_steps = 19703 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_sepes_per_train = 2000
+
+print("==Note: vlkan spec data is 1M tokens only ")
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
@@ -480,14 +504,15 @@ def check_gradients(model):
                 sys.exit(1)
 
 
+VALIDATION_STEPS = 250
 
 
-for step in range(max_steps):
+for step in range(start_step,max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
 
     # once in a while evaluate our validation loss
-    if step % 250 == 0 or last_step:
+    if step % VALIDATION_STEPS == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -509,7 +534,7 @@ for step in range(max_steps):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
             #if step > 0 and (step % 5000 == 0 or last_step):
 
-            if step > 0 and (step % 50 == 0 or last_step):
+            if step > 0 and (step % VALIDATION_STEPS == 0 or last_step):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
@@ -523,7 +548,7 @@ for step in range(max_steps):
                 torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if (step % 250 == 0 or last_step) and (not use_compile) and (not USE_INPUTTXT):
+    if (step % VALIDATION_STEPS == 0 or last_step) and (not use_compile) and (not USE_INPUTTXT):
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -557,7 +582,7 @@ for step in range(max_steps):
                 f.write(f"{step} hella {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except step 0, which is noise)
-    if ((step > 0 and step % 20 == 0) or last_step) and (not use_compile) :
+    if ((step > 0 and step % 100 == 0) or last_step) and (not use_compile) :
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -591,7 +616,10 @@ for step in range(max_steps):
         for i in range(num_return_sequences):
             tokens = xgen[i, :max_length].tolist()
             decoded = enc.decode(tokens)
-            print(f"rank {ddp_rank} sample {i}: {decoded}")
+
+            # Remove "<|endoftext|>" tokens from the output
+            cleaned_output = decoded.replace("<|endoftext|>", "").strip()
+            print(f"rank {ddp_rank} sample {i}: {cleaned_output}")
 
    
    
