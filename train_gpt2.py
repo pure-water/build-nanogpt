@@ -21,10 +21,15 @@ import argparse
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Train GPT-2 Model on Different Datasets")
 parser.add_argument('--dataset', type=str, default='vulkan', help='Dataset to use: inputtxt, fineweb, vulkan')
+parser.add_argument('--train_mode', type=str, choices=['scratch', 'fine_tune'], default='scratch',
+                    help='Specify whether to train from scratch or fine-tune a pretrained model (default: scratch)')
+
 args = parser.parse_args()
+
 
 # Set dataset_name based on the argument passed
 dataset_name = args.dataset
+train_mode = args.train_mode
 
 
 
@@ -55,7 +60,6 @@ class CausalSelfAttention(nn.Module):
         #self attentoin
         if (USE_FLASH):
           y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
-          y = F.scaled_dot_product_attention(q, k, v, is_causal=False) # flash attention
         else :
           # Standard dot-product attention instead of flash attention
           attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (C // self.n_head) ** 0.5  # Scaled dot-product
@@ -415,6 +419,7 @@ total_batch_size = B * T * 16 if USE_INPUTTXT else 524288 # 2**19, ~0.5M, in num
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
+    print(f"B:{B} T:{T}")
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
@@ -423,8 +428,25 @@ val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_w
 
 torch.set_float32_matmul_precision('high')
 
-# create model
-model = GPT(GPTConfig(vocab_size=50304))
+# create model based on train mode
+if train_mode == 'fine_tune':
+    print("Loading pretrained GPT-2 model for fine-tuning...")
+    from transformers import GPT2LMHeadModel
+    model = GPT2LMHeadModel.from_pretrained('gpt2')
+
+     # Freeze embedding layers to retain the pretrained general language representation
+    freeze_embedding_layers = True  # Set to True to freeze embedding layers
+    if freeze_embedding_layers:
+        model.transformer.wte.weight.requires_grad = False
+        model.transformer.wpe.weight.requires_grad = False
+        print("Freezing word and position embeddings.")
+
+else:
+    print("Training GPT-2 model from scratch...")
+    model = GPT(GPTConfig(vocab_size=50304))
+
+#  # create model
+#  model = GPT(GPTConfig(vocab_size=50304))
 # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
 model.to(device)
 use_compile = False # torch.compile interferes with HellaSwag eval and Generation. TODO fix
@@ -438,10 +460,22 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 # Decode steps
 
 # Load latest checkpoint if available
-latest_checkpoint = max(glob.glob(os.path.join(log_dir, "model_*.pt")), key=os.path.getctime, default=None)
+log_dir = "log"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log.txt")
+with open(log_file, "w") as f: # open for writing to clear the file
+    pass
 
-if latest_checkpoint:
-    checkpoint = torch.load(latest_checkpoint, map_location=device)
+latest_checkpoint = max(glob.glob(os.path.join(log_dir, "model_*.pt")), key=os.path.getctime, default=None)
+# optimize!
+if train_mode == 'fine_tune':
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+else:
+    optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=3e-4, device_type=device_type)
+
+
+if latest_checkpoint and (not train_mode == "fine_tune"):
+    checkpoint = torch.load(latest_checkpoint, map_location=device,weights_only=True)
     raw_model.load_state_dict(checkpoint['model'])
     optimizer.load_state_dict(checkpoint.get('optimizer', optimizer.state_dict()))
     start_step = checkpoint.get('step', 0) + 1
@@ -458,7 +492,7 @@ warmup_steps = 715
 max_steps = 19703 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 max_sepes_per_train = 2000
 
-print("==Note: vlkan spec data is 1M tokens only ")
+print("==Note: vulkan spec data is 1M tokens only ")
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
@@ -472,15 +506,8 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     return min_lr + coeff * (max_lr - min_lr)
 
-# optimize!
-optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=3e-4, device_type=device_type)
 
 # create the log directory we will write checkpoints to and log to
-log_dir = "log"
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"log.txt")
-with open(log_file, "w") as f: # open for writing to clear the file
-    pass
 
 # Add this function to check for NaN or Inf values
 def check_for_nan_or_inf(tensor, name=""):
@@ -523,7 +550,11 @@ for step in range(start_step,max_steps):
                 x, y = x.to(device), y.to(device)
                 #3060 Ti
                 with torch.autocast(device_type=device_type, dtype=amp_precision):
-                   logits, loss = model(x, y)
+                   if (train_mode == "fine_tune"):
+                        outputs = model(input_ids=x, labels=y)
+                        loss = outputs.loss
+                   else:
+                        logits, loss = model(x, y)
                    loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
         if ddp:
@@ -597,20 +628,31 @@ for step in range(start_step,max_steps):
             with torch.no_grad():
                 #with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 #with torch.autocast(device_type=device_type, dtype=torch.float16):
-                logits, loss = model(xgen) # (B, T, vocab_size)
+                if (train_mode == "fine_tune"):
+                     outputs = model(xgen)
+                else:
+                     logits, loss = model(xgen) # (B, T, vocab_size)
                 # take the logits at the last position
-                logits = logits[:, -1, :] # (B, vocab_size)
+                if (train_mode == "fine_tune"):
+                    logits = outputs.logits[:, -1, :] # (B, vocab_size)
+                else:
+                    logits = logits[:, -1, :] # (B, vocab_size)
                 # get the probabilities
+                #print(f"logits.shape:{logits.shape}")
                 probs = F.softmax(logits, dim=-1)
                 # do top-k sampling of 50 (huggingface pipeline default)
                 # topk_probs here becomes (5, 50), topk_indices is (5, 50)
                 topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                # print(f"topk_probs.shape {topk_probs.shape}")
+                # print(f"topk_indices.shape {topk_indices.shape}")
                 # select a token from the top-k probabilities
                 # note: multinomial does not demand the input to sum to 1
                 ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
                 # gather the corresponding indices
                 xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
                 # append to the sequence
+                # print("xgen shape:", xgen.shape)
+                # print("xcol shape:", xcol.shape)
                 xgen = torch.cat((xgen, xcol), dim=1)
         # print the generated text
         for i in range(num_return_sequences):
@@ -643,7 +685,11 @@ for step in range(start_step,max_steps):
         if ddp:
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         with torch.autocast(device_type=device_type, dtype=amp_precision):
-            logits, loss = model(x, y)
+            if (train_mode == "fine_tune"):
+                outputs = model(input_ids=x,labels=y)
+                loss = outputs.loss
+            else:
+                logits, loss = model(x, y)
         # we have to scale the loss to account for gradient accumulation,
         # because the gradients just add on each successive backward().
         # addition of gradients corresponds to a SUM in the objective, but
