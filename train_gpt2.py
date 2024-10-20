@@ -441,9 +441,25 @@ if train_mode == 'fine_tune':
         model.transformer.wpe.weight.requires_grad = False
         print("Freezing word and position embeddings.")
 
+    # Freeze all transformer layers for fine-tuning
+    for name, param in model.named_parameters():
+        param.requires_grad = False 
+
+        if ('h.11.mlp.c' ) in name:  # Only leave the last linear layer trainable
+            param.requires_grad = True 
+        if ('ln_f') in name:
+            param.requires_grad = True 
+
+    for name, param in model.named_parameters():
+         print(f"{name}: requires_grad={param.requires_grad}")
+
 else:
     print("Training GPT-2 model from scratch...")
     model = GPT(GPTConfig(vocab_size=50304))
+
+    for name, param in model.named_parameters():
+         print(f"{name}: requires_grad={param.requires_grad}")
+
 
 #  # create model
 #  model = GPT(GPTConfig(vocab_size=50304))
@@ -469,9 +485,11 @@ with open(log_file, "w") as f: # open for writing to clear the file
 latest_checkpoint = max(glob.glob(os.path.join(log_dir, "model_*.pt")), key=os.path.getctime, default=None)
 # optimize!
 if train_mode == 'fine_tune':
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+    fine_tune_lr = 3e-5
+    optimizer = torch.optim.AdamW(model.parameters(), lr=fine_tune_lr, betas=(0.9, 0.95), eps=1e-8)
 else:
-    optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=3e-4, device_type=device_type)
+    scratch_lr = 3e-5
+    optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=scratch_lr, device_type=device_type)
 
 
 if latest_checkpoint and (not train_mode == "fine_tune"):
